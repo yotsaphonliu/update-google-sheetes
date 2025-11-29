@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap/zapcore"
 	"google.golang.org/api/option"
 	"google.golang.org/api/sheets/v4"
+	"gopkg.in/yaml.v3"
 )
 
 // cliOptions describes all user controllable switches.
@@ -34,6 +35,8 @@ type cliOptions struct {
 	requireNonEmpty bool
 }
 
+const defaultConfigPath = "config.yaml"
+
 type updateSummary struct {
 	Ranges        []string
 	TotalCells    int64
@@ -41,9 +44,63 @@ type updateSummary struct {
 	SkippedReason string
 }
 
-func main() {
+type fileConfig struct {
+	SpreadsheetID string `yaml:"spreadsheet_id"`
+	ConfigXLSX    string `yaml:"config_xlsx"`
+	ConfigSheet   string `yaml:"config_sheet"`
+	LookupValue   string `yaml:"lookup_value"`
+}
+
+func resolveOptions(configPath string) (cliOptions, error) {
+	cfg, err := loadFileConfig(configPath)
+	if err == nil {
+		return optionsFromConfig(cfg)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return cliOptions{}, fmt.Errorf("read %s: %w", configPath, err)
+	}
 	reader := bufio.NewReader(os.Stdin)
-	opts := collectOptions(reader)
+	return collectOptions(reader), nil
+}
+
+func loadFileConfig(path string) (fileConfig, error) {
+	var cfg fileConfig
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cfg, err
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return cfg, nil
+}
+
+func optionsFromConfig(cfg fileConfig) (cliOptions, error) {
+	filePath := cfg.ConfigXLSX
+	if filePath == "" {
+		filePath = "Schedule.xlsx"
+	}
+	inline, err := json.Marshal([][]string{{cfg.LookupValue}})
+	if err != nil {
+		return cliOptions{}, fmt.Errorf("encode lookup value: %w", err)
+	}
+	return cliOptions{
+		spreadsheetID:   cfg.SpreadsheetID,
+		configExcel:     filePath,
+		configSheet:     cfg.ConfigSheet,
+		lookupValue:     cfg.LookupValue,
+		inlineValues:    string(inline),
+		requireNonEmpty: true,
+		valueInputMode:  "USER_ENTERED",
+		majorDimension:  "ROWS",
+	}, nil
+}
+
+func main() {
+	opts, err := resolveOptions(defaultConfigPath)
+	if err != nil {
+		exitErr("%v", err)
+	}
 	if err := opts.validateAndPopulate(); err != nil {
 		exitErr("%v", err)
 	}

@@ -1,0 +1,5 @@
+# Update these values and the CLI will use them automatically.
+spreadsheet_id: "1BqpRmUO6fjIUWA840gbgVvQnkht3Xv28lE4b8J3hp_U"
+config_xlsx: "Schedule.xlsx"
+config_sheet: "Live IMURA Dec 25"
+lookup_value: "โอเลี้ยง"
