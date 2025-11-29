@@ -43,8 +43,8 @@ GOOGLE_APPLICATION_CREDENTIALS=/path/key.json \
   -values '[["โอเลี้ยง"]]'
 ```
 Workflow:
-1. Every worksheet in `Schedule.xlsx` is scanned until the first cell whose trimmed text equals `โอเลี้ยง` is found.
-2. That sheet name + cell coordinate becomes the A1 range for the Sheets API call.
+1. Every worksheet in `Schedule.xlsx` is scanned and every cell whose trimmed text equals `โอเลี้ยง` is collected.
+2. Each sheet name + cell coordinate becomes part of a single Google Sheets batch update request, so duplicated labels all get updated together.
 3. Before overwriting, the tool (by default) checks that the destination cell currently contains something in Google Sheets. Set `-require-non-empty=false` if you want to allow writing to blank cells.
 
 This is handy when you maintain schedules locally but push definitive values into a central Google Sheet. Any Unicode text—including Thai labels like `โอเลี้ยง`—is supported as long as it matches exactly.
@@ -53,6 +53,7 @@ This is handy when you maintain schedules locally but push definitive values int
 - `-spreadsheet` (required): Spreadsheet ID from the sheet URL.
 - `-range`: A1 notation for the target range. Skip when using `-config-xlsx` + `-lookup-value`.
 - `-config-xlsx`: Path to an Excel workbook that contains the lookup text.
+- `-config-sheet`: Sheet name inside the Excel workbook to limit lookups to (optional).
 - `-lookup-value`: Exact cell text to search for within the Excel config.
 - `-require-non-empty`: Guard that stops the update if the Google Sheet destination is blank (default `true`).
 - `-value-input`: `RAW` or `USER_ENTERED` (default `USER_ENTERED`).
@@ -74,7 +75,7 @@ Example:
 If you are using a service-account JSON you can skip the script and rely on `GOOGLE_APPLICATION_CREDENTIALS` directly.
 
 ## Tips
-- When multiple cells share the same lookup text, only the first match in the Excel file is used. Consider expanding the lookup logic if you need disambiguation.
+- When multiple cells share the same lookup text, every match in the Excel file is updated.
 - Run with `-require-non-empty=false` when seeding a blank sheet for the first time.
 - Use `RAW` input mode if you want to avoid Google Sheets evaluating formulas.
 

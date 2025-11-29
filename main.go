@@ -9,8 +9,11 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/xuri/excelize/v2"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"google.golang.org/api/option"
 	"google.golang.org/api/sheets/v4"
 )
@@ -19,81 +22,171 @@ import (
 type cliOptions struct {
 	spreadsheetID   string
 	targetRange     string
+	targetRanges    []string
 	valueInputMode  string
 	majorDimension  string
 	inlineValues    string
 	valuesFile      string
 	configExcel     string
+	configSheet     string
 	lookupValue     string
 	requireNonEmpty bool
 }
 
+type updateSummary struct {
+	Ranges        []string
+	TotalCells    int64
+	TotalRows     int64
+	SkippedReason string
+}
+
 func main() {
 	opts := parseFlags()
-	if err := run(context.Background(), opts); err != nil {
+	logger, err := newLogger()
+	if err != nil {
+		exitErr("initialise logger: %v", err)
+	}
+	defer func() {
+		_ = logger.Sync()
+	}()
+
+	summary, err := run(context.Background(), opts)
+	if err != nil {
+		logger.Error("update failed", zap.Error(err))
 		exitErr("%v", err)
 	}
+
+	if summary.SkippedReason != "" {
+		logger.Info("no updates performed", zap.String("reason", summary.SkippedReason))
+		return
+	}
+
+	logger.Info(
+		"update complete",
+		zap.Strings("ranges", summary.Ranges),
+		zap.Int64("rows", summary.TotalRows),
+		zap.Int64("cells", summary.TotalCells),
+	)
+}
+
+func newLogger() (*zap.Logger, error) {
+	loc, err := time.LoadLocation("Asia/Bangkok")
+	if err != nil {
+		return nil, fmt.Errorf("load timezone: %w", err)
+	}
+	cfg := zap.NewProductionConfig()
+	cfg.Encoding = "console"
+	cfg.EncoderConfig = zap.NewProductionEncoderConfig()
+	cfg.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	cfg.EncoderConfig.EncodeTime = func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
+		enc.AppendString(t.In(loc).Format(time.RFC3339))
+	}
+	return cfg.Build()
 }
 
 // run drives the overall Sheet update flow so main() stays focused on exit handling.
-func run(ctx context.Context, opts cliOptions) error {
+func run(ctx context.Context, opts cliOptions) (updateSummary, error) {
+	var summary updateSummary
 	values, err := loadMatrix(opts)
 	if err != nil {
-		return fmt.Errorf("load values: %w", err)
+		return summary, fmt.Errorf("load values: %w", err)
 	}
 
 	if len(values) == 0 {
-		return errors.New("no values decoded; provide at least one row")
+		return summary, errors.New("no values decoded; provide at least one row")
 	}
 
 	svc, err := newSheetsService(ctx)
 	if err != nil {
-		return fmt.Errorf("initialise Sheets service: %w", err)
+		return summary, fmt.Errorf("initialise Sheets service: %w", err)
 	}
 
-	if opts.requireNonEmpty {
-		if err := ensureRangeHasValue(ctx, svc, opts.spreadsheetID, opts.targetRange); err != nil {
-			return fmt.Errorf("precondition failed: %w", err)
+	if len(opts.targetRanges) == 0 && opts.targetRange != "" {
+		// Backwards compatibility when validation only populated targetRange.
+		opts.targetRanges = []string{opts.targetRange}
+	}
+	if len(opts.targetRanges) == 0 {
+		return summary, errors.New("no target ranges resolved")
+	}
+
+	var (
+		payloads        []*sheets.ValueRange
+		requestedRanges []string
+	)
+	for _, rng := range opts.targetRanges {
+		rangeValues := values
+		if opts.requireNonEmpty {
+			existing, err := fetchRangeValues(ctx, svc, opts.spreadsheetID, rng)
+			if err != nil {
+				return summary, fmt.Errorf("precondition failed for %s: %w", rng, err)
+			}
+			merged, hasWrites := preserveExistingValues(existing, values)
+			if !hasWrites {
+				continue
+			}
+			rangeValues = merged
 		}
+
+		payloads = append(payloads, &sheets.ValueRange{
+			MajorDimension: opts.majorDimension,
+			Range:          rng,
+			Values:         rangeValues,
+		})
+		requestedRanges = append(requestedRanges, rng)
 	}
 
-	resp, err := updateValues(ctx, svc, opts, values)
+	if len(payloads) == 0 {
+		if opts.requireNonEmpty {
+			summary.SkippedReason = "require-non-empty=true and destination cells already populated"
+			return summary, nil
+		}
+		return summary, errors.New("no target ranges resolved")
+	}
+
+	resp, err := batchUpdateValues(ctx, svc, opts, payloads)
 	if err != nil {
-		return err
+		return summary, err
 	}
 
-	fmt.Printf("Updated %d cells across %d rows in %q.\n", resp.UpdatedCells, resp.UpdatedRows, opts.targetRange)
-	if resp.UpdatedData != nil && len(resp.UpdatedData.Values) > 0 {
-		encoded, _ := json.Marshal(resp.UpdatedData.Values)
-		fmt.Printf("Values now stored in range: %s\n", string(encoded))
+	summary.TotalCells = resp.TotalUpdatedCells
+	summary.TotalRows = resp.TotalUpdatedRows
+	for idx, updateResp := range resp.Responses {
+		rng := updateResp.UpdatedRange
+		if rng == "" && idx < len(requestedRanges) {
+			rng = requestedRanges[idx]
+		}
+		if rng == "" {
+			rng = fmt.Sprintf("response_%d", idx)
+		}
+		summary.Ranges = append(summary.Ranges, rng)
+	}
+	if len(summary.Ranges) == 0 {
+		summary.Ranges = requestedRanges
 	}
 
-	return nil
+	return summary, nil
 }
 
 func newSheetsService(ctx context.Context) (*sheets.Service, error) {
 	return sheets.NewService(ctx, option.WithScopes(sheets.SpreadsheetsScope))
 }
 
-// updateValues performs the actual API call and returns the Sheets response for logging.
-func updateValues(ctx context.Context, svc *sheets.Service, opts cliOptions, values [][]interface{}) (*sheets.UpdateValuesResponse, error) {
-	payload := &sheets.ValueRange{
-		MajorDimension: opts.majorDimension,
-		Range:          opts.targetRange,
-		Values:         values,
+// batchUpdateValues performs a single Sheets API batch update for all payloads.
+func batchUpdateValues(ctx context.Context, svc *sheets.Service, opts cliOptions, data []*sheets.ValueRange) (*sheets.BatchUpdateValuesResponse, error) {
+	req := &sheets.BatchUpdateValuesRequest{
+		ValueInputOption:        opts.valueInputMode,
+		IncludeValuesInResponse: true,
+		Data:                    data,
 	}
 
-	call := svc.Spreadsheets.
+	resp, err := svc.Spreadsheets.
 		Values.
-		Update(opts.spreadsheetID, opts.targetRange, payload).
-		ValueInputOption(opts.valueInputMode).
-		IncludeValuesInResponse(true)
-
-	resp, err := call.Context(ctx).Do()
+		BatchUpdate(opts.spreadsheetID, req).
+		Context(ctx).
+		Do()
 	if err != nil {
-		return nil, fmt.Errorf("update call failed: %w", err)
+		return nil, fmt.Errorf("batch update failed: %w", err)
 	}
-
 	return resp, nil
 }
 
@@ -107,7 +200,8 @@ func parseFlags() cliOptions {
 	flag.StringVar(&opts.inlineValues, "values", "", "JSON encoded 2D array of values (overrides stdin)")
 	flag.StringVar(&opts.valuesFile, "values-file", "", "Path to a JSON file with the 2D values array")
 	flag.StringVar(&opts.configExcel, "config-xlsx", "", "Path to an Excel config file used to derive the range")
-	flag.StringVar(&opts.lookupValue, "lookup-value", "", "Exact cell value to search for inside the Excel config")
+	flag.StringVar(&opts.configSheet, "config-sheet", "", "Limit Excel lookup to this sheet name")
+	flag.StringVar(&opts.lookupValue, "lookup-value", "", "Exact cell value to search for inside the Excel config (all matches are updated)")
 	flag.BoolVar(&opts.requireNonEmpty, "require-non-empty", true, "Only update when the current Google Sheet range already contains data")
 
 	flag.Usage = func() {
@@ -133,7 +227,7 @@ func (opts *cliOptions) validateAndPopulate() error {
 		return errors.New("-spreadsheet is required")
 	}
 
-	if err := opts.fillRangeIfMissing(); err != nil {
+	if err := opts.populateRanges(); err != nil {
 		return err
 	}
 
@@ -154,75 +248,115 @@ func (opts *cliOptions) validateAndPopulate() error {
 	return nil
 }
 
-func (opts *cliOptions) fillRangeIfMissing() error {
-	if opts.targetRange != "" {
+func (opts *cliOptions) populateRanges() error {
+	switch {
+	case opts.targetRange != "":
+		opts.targetRanges = []string{opts.targetRange}
+		return nil
+	case opts.configExcel == "" || opts.lookupValue == "":
+		return errors.New("provide -range or both -config-xlsx and -lookup-value")
+	default:
+		rngs, err := deriveRangesFromExcel(opts.configExcel, opts.configSheet, opts.lookupValue)
+		if err != nil {
+			return fmt.Errorf("derive range from config: %w", err)
+		}
+		if len(rngs) == 0 {
+			return fmt.Errorf("value %q not found in %s", opts.lookupValue, opts.configExcel)
+		}
+		opts.targetRanges = rngs
 		return nil
 	}
-	if opts.configExcel == "" || opts.lookupValue == "" {
-		return errors.New("provide -range or both -config-xlsx and -lookup-value")
-	}
-	rng, err := deriveRangeFromExcel(opts.configExcel, opts.lookupValue)
-	if err != nil {
-		return fmt.Errorf("derive range from config: %w", err)
-	}
-	fmt.Fprintf(os.Stderr, "Located %q in %s -> using range %s\n", opts.lookupValue, opts.configExcel, rng)
-	opts.targetRange = rng
-	return nil
 }
 
-// ensureRangeHasValue guards destructive updates by confirming we are not overwriting emptiness.
-func ensureRangeHasValue(ctx context.Context, svc *sheets.Service, sheetID, rng string) error {
+// fetchRangeValues reads the target range so we can decide whether to write over each cell.
+func fetchRangeValues(ctx context.Context, svc *sheets.Service, sheetID, rng string) ([][]interface{}, error) {
 	resp, err := svc.Spreadsheets.Values.Get(sheetID, rng).Context(ctx).Do()
 	if err != nil {
-		return fmt.Errorf("fetch current value: %w", err)
+		return nil, fmt.Errorf("fetch current value: %w", err)
 	}
-	if !hasAnyValue(resp.Values) {
-		return fmt.Errorf("range %s is empty", rng)
-	}
-	return nil
+	return resp.Values, nil
 }
 
-func hasAnyValue(values [][]interface{}) bool {
-	for _, row := range values {
-		for _, cell := range row {
-			if fmt.Sprint(cell) != "" {
-				return true
+// preserveExistingValues keeps non-empty current cells intact by substituting them back into the payload.
+func preserveExistingValues(existing, incoming [][]interface{}) ([][]interface{}, bool) {
+	merged := make([][]interface{}, len(incoming))
+	var hasWrites bool
+	for r, row := range incoming {
+		mergedRow := make([]interface{}, len(row))
+		for c, val := range row {
+			if cellHasValue(existing, r, c) {
+				mergedRow[c] = existing[r][c]
+				continue
+			}
+			mergedRow[c] = val
+			if fmt.Sprint(val) != "" {
+				hasWrites = true
 			}
 		}
+		merged[r] = mergedRow
 	}
-	return false
+	return merged, hasWrites
 }
 
-// deriveRangeFromExcel finds the lookup value and returns an A1 range pointing at it.
-func deriveRangeFromExcel(path, lookup string) (string, error) {
+func cellHasValue(values [][]interface{}, row, col int) bool {
+	if row >= len(values) {
+		return false
+	}
+	if col >= len(values[row]) {
+		return false
+	}
+	return fmt.Sprint(values[row][col]) != ""
+}
+
+// deriveRangesFromExcel finds every cell that matches the lookup value and returns their A1 ranges.
+// When sheetFilter is set, only that worksheet is scanned.
+func deriveRangesFromExcel(path, sheetFilter, lookup string) ([]string, error) {
 	f, err := excelize.OpenFile(path)
 	if err != nil {
-		return "", fmt.Errorf("open config workbook: %w", err)
+		return nil, fmt.Errorf("open config workbook: %w", err)
 	}
 	defer func() {
 		_ = f.Close()
 	}()
 
 	want := normalizeCellText(lookup)
-	for _, sheet := range f.GetSheetList() {
+	var matches []string
+	sheets := f.GetSheetList()
+	if sheetFilter != "" {
+		found := false
+		for _, s := range sheets {
+			if s == sheetFilter {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("sheet %q not found in %s", sheetFilter, path)
+		}
+		sheets = []string{sheetFilter}
+	}
+	for _, sheet := range sheets {
 		rows, err := f.GetRows(sheet)
 		if err != nil {
-			return "", fmt.Errorf("read sheet %s: %w", sheet, err)
+			return nil, fmt.Errorf("read sheet %s: %w", sheet, err)
 		}
 		for rIdx, row := range rows {
 			for cIdx, cell := range row {
 				if normalizeCellText(cell) == want {
 					cellRef, err := excelize.CoordinatesToCellName(cIdx+1, rIdx+1)
 					if err != nil {
-						return "", fmt.Errorf("build cell name: %w", err)
+						return nil, fmt.Errorf("build cell name: %w", err)
 					}
-					return formatSheetRange(sheet, cellRef), nil
+					matches = append(matches, formatSheetRange(sheet, cellRef))
 				}
 			}
 		}
 	}
 
-	return "", fmt.Errorf("value %q not found in %s", lookup, path)
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("value %q not found in %s", lookup, path)
+	}
+	return matches, nil
 }
 
 func formatSheetRange(sheet, cell string) string {
