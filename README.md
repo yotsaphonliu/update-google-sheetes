@@ -1,83 +1,36 @@
 # update-google-sheets
 
-Automates writing cell values to a Google Sheet from the command line. You can target a range directly (e.g. `Sheet1!B5`) or point the tool at an Excel configuration file and let it determine the cell for you in real time.
+Push values into Google Sheets using labels stored in an Excel workbook.
 
 ## Requirements
-- Go 1.24 or newer
-- Google Cloud project with the Google Sheets API enabled
-- Credentials exposed via Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json` works well)
-- Optional: an Excel workbook (like `Schedule.xlsx`) that maps friendly labels to the actual cell coordinates
+- Go 1.24+
+- Google Sheets API enabled and credentials exposed via `GOOGLE_APPLICATION_CREDENTIALS`
+- Excel workbook (copied to `cfg/Schedule.xlsx`)
 
-```bash
-export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.config/gcloud/application_default_credentials.json"
-```
+## Setup
+1. Run `go run ./cmd/configset`.
+   - Enter the spreadsheet ID, optional sheet filter, and lookup value (defaults populate from the previous run).
+   - Choose whether to keep the existing workbook or pick a new one via Finder. Selected files must be `.xls` or `.xlsx`; the file is copied to `cfg/Schedule.xlsx`.
+2. The answers are saved in `cfg/config.yaml`.
 
-## Build
-```
-go build ./...
-```
-This produces an `update-google-sheets` binary in the repo directory; you can also run it with `go run .` while iterating.
-
-## Basic usage
-Populate `cfg/config.yaml` (see below) and run the app:
+## Updating the sheet
 ```
 GOOGLE_APPLICATION_CREDENTIALS=/path/key.json go run .
 ```
-When the config file exists the CLI runs without prompts. If it is missing you will be guided through the same questions interactively (spreadsheet ID, Excel workbook + lookup value). Either way, the tool prints the updated ranges and row/cell counts once the write succeeds.
+The tool reads `cfg/config.yaml`, finds every matching cell inside `cfg/Schedule.xlsx`, confirms the target range already has data, and writes the lookup value. Logs show the ranges updated and row/cell counts.
 
-## Configuration file
-`cfg/config.yaml` controls non-interactive runs:
-```yaml
-spreadsheet_id: "your-sheet-id"
-config_sheet: "Sheet1"          # optional sheet filter
-lookup_value: "โอเลี้ยง"        # required
+## Authentication helper (optional)
+User credentials often need a quota project. You can run:
 ```
-The workbook always lives at `cfg/Schedule.xlsx`. Delete the YAML if you prefer to answer the prompts each time.
-
-### Updating the config via CLI
-Run the helper command to rewrite the YAML and, if desired, copy a new workbook into `cfg/Schedule.xlsx`:
-```
-go run ./cmd/configset \
-  -spreadsheet 1BqpRmUO6fjIUWA840gbgVvQnkht3Xv28lE4b8J3hp_U \
-  -sheet "Live IMURA Dec 25" \
-  -lookup "โอเลี้ยง" \
-  -workbook-src /path/to/Schedule.xlsx
-```
-Leave `-workbook-src` blank (or press Enter in the interactive wizard) to keep the existing workbook.
-
-## Excel-driven lookup
-Whether values came from the config file or the wizard, the workflow is identical:
-1. Every worksheet in `cfg/Schedule.xlsx` is scanned and every cell whose trimmed text equals `โอเลี้ยง` is collected.
-2. Each sheet name + cell coordinate becomes part of a single Google Sheets batch update request, so duplicated labels all get updated together.
-3. Before overwriting, the tool (by default) checks that the destination cell currently contains something in Google Sheets. Answer "n" when prompted if you want to allow writing to blank cells.
-
-This is handy when you maintain schedules locally but push definitive values into a central Google Sheet. Any Unicode text—including Thai labels like `โอเลี้ยง`—is supported as long as it matches exactly.
-
-## Interactive choices
-If `cfg/config.yaml` is absent you will be prompted to:
-- Enter the spreadsheet ID.
-- Provide an optional sheet filter and lookup value.
-- (Optionally) copy a local workbook into `cfg/Schedule.xlsx`.
-- Confirm that the target range must already contain data (this guard is always enforced).
-
-## Helper scripts for gcloud ADC
-Use `scripts/gcloud_login.sh` to establish Application Default Credentials with the proper scopes and optional quota project:
-```
-export GCP_QUOTA_PROJECT=my-gcp-project    # optional but recommended for user creds
 ./scripts/gcloud_login.sh
-```
-Once authenticated, launch the updater (config file or wizard) via `run_with_gcloud.sh`:
-```
 ./scripts/run_with_gcloud.sh
 ```
-If you are using a service-account JSON you can skip both scripts and rely on `GOOGLE_APPLICATION_CREDENTIALS` directly.
+Skip these if you rely on a service-account JSON file.
 
-## Tips
-- When multiple cells share the same lookup text, every match in the Excel file is updated.
-- Keep `Schedule.xlsx` in sync with the Google Sheet so lookups remain accurate.
-- Delete or adjust `cfg/config.yaml` when switching to a different spreadsheet.
+## Tweaking the config later
+Re-run `go run ./cmd/configset` whenever you need to change the spreadsheet ID, sheet filter, lookup text, or workbook. Defaults are pre-filled with the current values.
 
-## Troubleshooting
-- **auth errors**: ensure the service account has edit access to the sheet and `GOOGLE_APPLICATION_CREDENTIALS` points to the JSON key.
-- **lookup failures**: verify the lookup text has no leading/trailing spaces (the tool trims whitespace) and that the workbook path is correct.
-- **empty-range precondition**: seed the Google Sheet manually before running; empty ranges are skipped by design.
+## Notes
+- `cfg/config.yaml` and `cfg/Schedule.xlsx` are the only inputs the updater uses. Delete the YAML to rerun the wizard from scratch.
+- Finder selections only accept `.xls`/`.xlsx` files.
+- The updater refuses to overwrite empty ranges—seed the sheet manually the first time.
