@@ -15,16 +15,11 @@ go build ./...
 This produces an `update-google-sheets` binary in the repo directory; you can also run it with `go run .` while iterating.
 
 ## Basic usage
-Provide the spreadsheet ID from the Google Sheets URL, the range in A1 notation, and the JSON matrix you want written:
+Run the tool and follow the prompts—no flags required:
 ```
-GOOGLE_APPLICATION_CREDENTIALS=/path/key.json \
-  go run . \
-  -spreadsheet 1AbcDeFgHij1234567890 \
-  -range "Sheet1!A2:C3" \
-  -value-input USER_ENTERED \
-  -values '[["Name","Score"],["Ada",98],["Ben",91]]'
+GOOGLE_APPLICATION_CREDENTIALS=/path/key.json go run .
 ```
-The program echoes how many cells were modified and prints the values returned by the Sheets API so you can confirm the write.
+The wizard will ask for the spreadsheet ID, how to pick the destination range (manual entry or Excel lookup), how to supply the JSON matrix (paste now or point at a file), and a few behavioural choices. When the write succeeds it prints the updated ranges and row/cell counts.
 
 ### Supplying values
 The CLI expects a JSON array of arrays. Choose one of the following inputs (priority order):
@@ -33,36 +28,22 @@ The CLI expects a JSON array of arrays. Choose one of the following inputs (prio
 3. Standard input (e.g. `cat data.json | go run . …`)
 
 ## Excel-driven lookup
-If an Excel file already maps labels to their spreadsheet positions, let the tool resolve the range automatically:
-```
-GOOGLE_APPLICATION_CREDENTIALS=/path/key.json \
-  go run . \
-  -spreadsheet 1Abc... \
-  -config-xlsx Schedule.xlsx \
-  -lookup-value 'โอเลี้ยง' \
-  -values '[["โอเลี้ยง"]]'
-```
-Workflow:
+Every run now relies on the Excel workbook to determine where to write. The workflow is identical to the previous description:
 1. Every worksheet in `Schedule.xlsx` is scanned and every cell whose trimmed text equals `โอเลี้ยง` is collected.
 2. Each sheet name + cell coordinate becomes part of a single Google Sheets batch update request, so duplicated labels all get updated together.
-3. Before overwriting, the tool (by default) checks that the destination cell currently contains something in Google Sheets. Set `-require-non-empty=false` if you want to allow writing to blank cells.
+3. Before overwriting, the tool (by default) checks that the destination cell currently contains something in Google Sheets. Answer "n" when prompted if you want to allow writing to blank cells.
 
 This is handy when you maintain schedules locally but push definitive values into a central Google Sheet. Any Unicode text—including Thai labels like `โอเลี้ยง`—is supported as long as it matches exactly.
 
-## Flags
-- `-spreadsheet` (required): Spreadsheet ID from the sheet URL.
-- `-range`: A1 notation for the target range. Skip when using `-config-xlsx` + `-lookup-value`.
-- `-config-xlsx`: Path to an Excel workbook that contains the lookup text.
-- `-config-sheet`: Sheet name inside the Excel workbook to limit lookups to (optional).
-- `-lookup-value`: Exact cell text to search for within the Excel config.
-- `-require-non-empty`: Guard that stops the update if the Google Sheet destination is blank (default `true`).
-- `-value-input`: `RAW` or `USER_ENTERED` (default `USER_ENTERED`).
-- `-dimension`: `ROWS` or `COLUMNS` for how the data should be applied (default `ROWS`).
-- `-values`: Inline JSON matrix.
-- `-values-file`: Path to a JSON matrix file.
+## Interactive choices
+During the wizard you will be asked to:
+- Enter the spreadsheet ID.
+- Provide the Excel workbook path (defaults to `Schedule.xlsx` in the repo) and optional sheet filter, plus the lookup value to locate inside the workbook.
+- The tool automatically uses Sheets’ `USER_ENTERED` behavior and writes by rows.
+- Updates are only applied when the Google Sheet already contains data at the target range; if the range is empty the run exits.
 
 ## Helper script for gcloud ADC
-`run_with_gcloud.sh` automates the recommended authentication flow when you rely on user credentials. It performs `gcloud auth application-default login --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/spreadsheets"`, optionally sets a quota project when `GCP_QUOTA_PROJECT` is exported, and then executes `go run .` with the arguments you pass after `--`.
+`run_with_gcloud.sh` automates the recommended authentication flow when you rely on user credentials. It performs `gcloud auth application-default login --scopes="https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/spreadsheets"`, optionally sets a quota project when `GCP_QUOTA_PROJECT` is exported, and then executes `go run .` with the arguments you pass after `--` (the wizard still handles every in-app choice).
 
 Example:
 ```

@@ -1,13 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,7 +42,11 @@ type updateSummary struct {
 }
 
 func main() {
-	opts := parseFlags()
+	reader := bufio.NewReader(os.Stdin)
+	opts := collectOptions(reader)
+	if err := opts.validateAndPopulate(); err != nil {
+		exitErr("%v", err)
+	}
 	logger, err := newLogger()
 	if err != nil {
 		exitErr("initialise logger: %v", err)
@@ -190,33 +195,24 @@ func batchUpdateValues(ctx context.Context, svc *sheets.Service, opts cliOptions
 	return resp, nil
 }
 
-func parseFlags() cliOptions {
+func collectOptions(reader *bufio.Reader) cliOptions {
+	fmt.Println("Google Sheets update wizard\n------------------------------")
 	var opts cliOptions
-
-	flag.StringVar(&opts.spreadsheetID, "spreadsheet", "", "ID of the Google Sheet to update")
-	flag.StringVar(&opts.targetRange, "range", "", "Target range in A1 notation (e.g. Sheet1!A2:C4)")
-	flag.StringVar(&opts.valueInputMode, "value-input", "USER_ENTERED", "Value input option: RAW or USER_ENTERED")
-	flag.StringVar(&opts.majorDimension, "dimension", "ROWS", "Major dimension to use when writing (ROWS or COLUMNS)")
-	flag.StringVar(&opts.inlineValues, "values", "", "JSON encoded 2D array of values (overrides stdin)")
-	flag.StringVar(&opts.valuesFile, "values-file", "", "Path to a JSON file with the 2D values array")
-	flag.StringVar(&opts.configExcel, "config-xlsx", "", "Path to an Excel config file used to derive the range")
-	flag.StringVar(&opts.configSheet, "config-sheet", "", "Limit Excel lookup to this sheet name")
-	flag.StringVar(&opts.lookupValue, "lookup-value", "", "Exact cell value to search for inside the Excel config (all matches are updated)")
-	flag.BoolVar(&opts.requireNonEmpty, "require-non-empty", true, "Only update when the current Google Sheet range already contains data")
-
-	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [flags] < optional JSON from stdin >\n", os.Args[0])
-		fmt.Fprintln(flag.CommandLine.Output(), "\nFlags:")
-		flag.PrintDefaults()
-		fmt.Fprintln(flag.CommandLine.Output(), "\nProvide the values as a JSON array of arrays. Example: [[\"Name\",\"Score\"],[\"Mia\",42]]")
-		fmt.Fprintln(flag.CommandLine.Output(), "The program relies on Application Default Credentials, e.g. set GOOGLE_APPLICATION_CREDENTIALS to a service account key file.")
+	opts.spreadsheetID = promptRequired(reader, "Enter the Google Spreadsheet ID:")
+	fmt.Println()
+	opts.configExcel = promptExistingFile(reader, "Path to the Excel workbook (press Enter for Schedule.xlsx):", "Schedule.xlsx")
+	opts.configSheet = promptOptional(reader, "Limit lookup to a single sheet (press Enter to scan all):")
+	opts.lookupValue = promptRequired(reader, "Lookup value to search for:")
+	inline, err := json.Marshal([][]string{{opts.lookupValue}})
+	if err != nil {
+		exitErr("encode lookup value: %v", err)
 	}
+	opts.inlineValues = string(inline)
 
-	flag.Parse()
+	opts.valueInputMode = "USER_ENTERED"
+	opts.majorDimension = "ROWS"
 
-	if err := opts.validateAndPopulate(); err != nil {
-		exitErr("%v", err)
-	}
+	opts.requireNonEmpty = true
 
 	return opts
 }
@@ -416,4 +412,92 @@ func readRawData(opts cliOptions) ([]byte, error) {
 func exitErr(msg string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, msg+"\n", args...)
 	os.Exit(1)
+}
+
+func promptRequired(reader *bufio.Reader, question string) string {
+	for {
+		answer := promptLine(reader, question)
+		if strings.TrimSpace(answer) != "" {
+			return strings.TrimSpace(answer)
+		}
+		fmt.Println("Please enter a value.")
+	}
+}
+
+func promptOptional(reader *bufio.Reader, question string) string {
+	return promptLine(reader, question)
+}
+
+func promptExistingFile(reader *bufio.Reader, question, defaultPath string) string {
+	for {
+		path := strings.TrimSpace(promptLine(reader, question))
+		if path == "" {
+			if defaultPath == "" {
+				fmt.Println("Please provide a file path.")
+				continue
+			}
+			path = defaultPath
+		}
+		if _, err := os.Stat(path); err == nil {
+			return path
+		} else {
+			fmt.Printf("File %q is not accessible: %v\n", path, err)
+		}
+	}
+}
+
+func promptMenu(reader *bufio.Reader, question string, options []string) int {
+	for {
+		fmt.Println(question)
+		for i, opt := range options {
+			fmt.Printf("  %d) %s\n", i+1, opt)
+		}
+		choice := strings.TrimSpace(promptLine(reader, "Choose an option:"))
+		idx, err := strconv.Atoi(choice)
+		if err == nil && idx >= 1 && idx <= len(options) {
+			return idx - 1
+		}
+		fmt.Println("Enter a number from the list above.")
+	}
+}
+
+func promptYesNo(reader *bufio.Reader, question string, defaultYes bool) bool {
+	defText := "Y"
+	if !defaultYes {
+		defText = "N"
+	}
+	for {
+		answer := strings.TrimSpace(promptLine(reader, question))
+		if answer == "" {
+			return defaultYes
+		}
+		switch strings.ToLower(answer) {
+		case "y", "yes":
+			return true
+		case "n", "no":
+			return false
+		default:
+			fmt.Printf("Please enter Y or N (default %s).\n", defText)
+		}
+	}
+}
+
+func promptLine(reader *bufio.Reader, question string) string {
+	fmt.Print(question + " ")
+	line, err := readLine(reader)
+	if err != nil {
+		exitErr("read input: %v", err)
+	}
+	return line
+}
+
+func readLine(reader *bufio.Reader) (string, error) {
+	line, err := reader.ReadString('\n')
+	if errors.Is(err, io.EOF) {
+		if len(line) == 0 {
+			return "", err
+		}
+		err = nil
+	}
+	return strings.TrimSpace(line), err
 }
