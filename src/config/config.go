@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	survey "github.com/AlecAivazis/survey/v2"
 	"gopkg.in/yaml.v3"
 )
 
@@ -20,7 +20,6 @@ const (
 // Config captures the data needed to perform an update.
 type Config struct {
 	SpreadsheetID string `yaml:"spreadsheet_id"`
-	Workbook      string `yaml:"config_xlsx"`
 	SheetFilter   string `yaml:"config_sheet"`
 	LookupValue   string `yaml:"lookup_value"`
 }
@@ -39,16 +38,12 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("read %s: %w", path, err)
 	}
 	fmt.Printf("%s not found; switching to interactive setup.\n\n", path)
-	return prompt(os.Stdin)
+	return prompt(), nil
 }
 
 // Validate normalises defaults and checks required fields.
 func (c *Config) Validate() error {
 	c.SpreadsheetID = strings.TrimSpace(c.SpreadsheetID)
-	c.Workbook = strings.TrimSpace(c.Workbook)
-	if c.Workbook == "" {
-		c.Workbook = DefaultWorkbook
-	}
 	c.SheetFilter = strings.TrimSpace(c.SheetFilter)
 	c.LookupValue = strings.TrimSpace(c.LookupValue)
 
@@ -58,88 +53,35 @@ func (c *Config) Validate() error {
 	if c.LookupValue == "" {
 		return errors.New("lookup_value is required")
 	}
-	if _, err := os.Stat(c.Workbook); err != nil {
-		return fmt.Errorf("access %s: %w", c.Workbook, err)
+	if _, err := os.Stat(DefaultWorkbook); err != nil {
+		return fmt.Errorf("access %s: %w", DefaultWorkbook, err)
 	}
 	return nil
 }
 
-func prompt(input io.Reader) (Config, error) {
-	r := bufio.NewReader(input)
-	spreadsheetID, err := promptRequired(r, "Google Spreadsheet ID:")
-	if err != nil {
-		return Config{}, err
+func prompt() Config {
+	var cfg Config
+	if err := survey.AskOne(&survey.Input{Message: "Google Spreadsheet ID"}, &cfg.SpreadsheetID, survey.WithValidator(survey.Required)); err != nil {
+		fmt.Fprintln(os.Stderr, "input cancelled:", err)
+		os.Exit(1)
 	}
-	workbook, err := promptFile(r, "Path to the Excel workbook (default cfg/Schedule.xlsx):", DefaultWorkbook)
-	if err != nil {
-		return Config{}, err
+	if err := survey.AskOne(&survey.Input{Message: "Limit lookup to a single sheet (press Enter for all)"}, &cfg.SheetFilter); err != nil {
+		fmt.Fprintln(os.Stderr, "input cancelled:", err)
+		os.Exit(1)
 	}
-	sheetFilter, err := promptLine(r, "Limit lookup to a single sheet (press Enter for all):")
-	if err != nil {
-		return Config{}, err
-	}
-	lookup, err := promptRequired(r, "Lookup value to search for:")
-	if err != nil {
-		return Config{}, err
+	if err := survey.AskOne(&survey.Input{Message: "Lookup value to search for"}, &cfg.LookupValue, survey.WithValidator(survey.Required)); err != nil {
+		fmt.Fprintln(os.Stderr, "input cancelled:", err)
+		os.Exit(1)
 	}
 	fmt.Println()
 	fmt.Println("Tip: store these answers in config.yaml to skip the wizard next time.")
-
-	return Config{
-		SpreadsheetID: spreadsheetID,
-		Workbook:      workbook,
-		SheetFilter:   strings.TrimSpace(sheetFilter),
-		LookupValue:   lookup,
-	}, nil
-}
-
-func promptRequired(r *bufio.Reader, question string) (string, error) {
-	for {
-		answer, err := promptLine(r, question)
-		if err != nil {
-			return "", err
-		}
-		answer = strings.TrimSpace(answer)
-		if answer != "" {
-			return answer, nil
-		}
-		fmt.Println("Please enter a value.")
-	}
-}
-
-func promptFile(r *bufio.Reader, question, defaultPath string) (string, error) {
-	for {
-		answer, err := promptLine(r, question)
-		if err != nil {
-			return "", err
-		}
-		answer = strings.TrimSpace(answer)
-		if answer == "" {
-			answer = defaultPath
-		}
-		if _, statErr := os.Stat(answer); statErr == nil {
-			return answer, nil
-		}
-		fmt.Printf("File %q is not accessible.\n", answer)
-	}
-}
-
-func promptLine(r *bufio.Reader, question string) (string, error) {
-	fmt.Print(question + " ")
-	line, err := r.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", err
-	}
-	return strings.TrimSpace(line), nil
+	return cfg
 }
 
 // Write saves the configuration and optionally copies a workbook into place.
 func Write(cfg Config, workbookSource string) error {
-	if cfg.Workbook == "" {
-		cfg.Workbook = DefaultWorkbook
-	}
 	if workbookSource != "" {
-		if err := copyFile(workbookSource, cfg.Workbook); err != nil {
+		if err := copyFile(workbookSource, DefaultWorkbook); err != nil {
 			return fmt.Errorf("copy workbook: %w", err)
 		}
 	}

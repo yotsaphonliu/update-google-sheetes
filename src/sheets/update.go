@@ -31,7 +31,7 @@ func Update(ctx context.Context, cfg config.Config) (Summary, error) {
 		return summary, fmt.Errorf("initialise Sheets service: %w", err)
 	}
 
-	ranges, err := deriveRangesFromExcel(cfg.Workbook, cfg.SheetFilter, cfg.LookupValue)
+	ranges, err := deriveRangesFromExcel(config.DefaultWorkbook, cfg.SheetFilter, cfg.LookupValue)
 	if err != nil {
 		return summary, err
 	}

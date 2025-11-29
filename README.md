@@ -29,23 +29,21 @@ When the config file exists the CLI runs without prompts. If it is missing you w
 `cfg/config.yaml` controls non-interactive runs:
 ```yaml
 spreadsheet_id: "your-sheet-id"
-config_xlsx: "cfg/Schedule.xlsx"   # optional; defaults to cfg/Schedule.xlsx
 config_sheet: "Sheet1"          # optional sheet filter
 lookup_value: "โอเลี้ยง"        # required
 ```
-The CLI writes the lookup value into every matching cell in Google Sheets. Delete the file if you prefer to answer the prompts each time.
+The workbook always lives at `cfg/Schedule.xlsx`. Delete the YAML if you prefer to answer the prompts each time.
 
 ### Updating the config via CLI
-Run the helper command to rewrite the YAML and copy a workbook into place:
+Run the helper command to rewrite the YAML and, if desired, copy a new workbook into `cfg/Schedule.xlsx`:
 ```
 go run ./cmd/configset \
   -spreadsheet 1BqpRmUO6fjIUWA840gbgVvQnkht3Xv28lE4b8J3hp_U \
   -sheet "Live IMURA Dec 25" \
   -lookup "โอเลี้ยง" \
-  -workbook-src /path/to/Schedule.xlsx \
-  -workbook-dest cfg/Schedule.xlsx
+  -workbook-src /path/to/Schedule.xlsx
 ```
-The command overwrites `cfg/Schedule.xlsx` with the provided source file and saves the YAML at `cfg/config.yaml`.
+Leave `-workbook-src` blank (or press Enter in the interactive wizard) to keep the existing workbook.
 
 ## Excel-driven lookup
 Whether values came from the config file or the wizard, the workflow is identical:
@@ -58,7 +56,8 @@ This is handy when you maintain schedules locally but push definitive values int
 ## Interactive choices
 If `cfg/config.yaml` is absent you will be prompted to:
 - Enter the spreadsheet ID.
-- Provide the Excel workbook path (defaults to `cfg/Schedule.xlsx`) and optional sheet filter, plus the lookup value to locate inside the workbook.
+- Provide an optional sheet filter and lookup value.
+- (Optionally) copy a local workbook into `cfg/Schedule.xlsx`.
 - Confirm that the target range must already contain data (this guard is always enforced).
 
 ## Helper scripts for gcloud ADC

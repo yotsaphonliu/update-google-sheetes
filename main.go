@@ -30,7 +30,7 @@ func main() {
 	log.Info(
 		"using configuration",
 		zap.String("spreadsheet_id", cfg.SpreadsheetID),
-		zap.String("workbook", cfg.Workbook),
+		zap.String("workbook", config.DefaultWorkbook),
 		zap.String("sheet_filter", cfg.SheetFilter),
 		zap.String("lookup_value", cfg.LookupValue),
 	)
