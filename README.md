@@ -23,6 +23,7 @@ Push one lookup value into many Google Sheets cells using an Excel workbook as t
 2. The tool loads `cfg/config.yaml`, scans `cfg/Schedule.xlsx` for the lookup value, fetches the matching ranges from the Google Sheet, and writes the lookup value into any cells that currently contain something else. Logs list every range touched plus total rows/cells.
 
 ## Optional auth helpers
+Run `make gcloud-all` to run both steps in one shot.
 Run `make gcloud-login` to perform the scoped ADC login through `gcloud`.
 Run `make run-with-gcloud` to launch the updater using that session.
 
