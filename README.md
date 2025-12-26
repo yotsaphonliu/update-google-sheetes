@@ -1,36 +1,32 @@
 # update-google-sheets
 
-Push values into Google Sheets using labels stored in an Excel workbook.
+Push one lookup value into many Google Sheets cells using an Excel workbook as the map.
+
+## Main pieces
+- `cfg/Schedule.xlsx`(template) ---> Google Sheet (target)
 
 ## Requirements
 - Go 1.24+
-- Google Sheets API enabled and credentials exposed via `GOOGLE_APPLICATION_CREDENTIALS`
-- Excel workbook (copied to `cfg/Schedule.xlsx`)
+- Google Sheets API enabled and credentials referenced via `GOOGLE_APPLICATION_CREDENTIALS`
+- An Excel workbook you want to use as the stencil (copied to `cfg/Schedule.xlsx`)
 
-## Setup
-1. Run `go run ./cmd/configset`.
-   - Enter the spreadsheet ID, optional sheet filter, and lookup value (defaults populate from the previous run).
-   - Choose whether to keep the existing workbook or pick a new one via Finder. Selected files must be `.xls` or `.xlsx`; the file is copied to `cfg/Schedule.xlsx`.
-2. The answers are saved in `cfg/config.yaml`.
+## Configure the run
+1. `go run ./cmd/configset`
+   - Provide the **Google spreadsheet ID** (the part after `/d/` in the URL).
+   - Optionally enter a **sheet filter** to restrict matching to a single tab inside the workbook.
+   - Enter the **lookup value** (the text the updater searches for inside the workbook).
+   - Decide whether to keep the existing workbook or pick a new `.xls`/`.xlsx` file; the chosen file is copied into `cfg/Schedule.xlsx`.
+2. Answers land in `cfg/config.yaml`. Re-run the wizard any time you want to change the spreadsheet, lookup text, or workbook.
 
-## Updating the sheet
-```
-GOOGLE_APPLICATION_CREDENTIALS=/path/key.json go run .
-```
-The tool reads `cfg/config.yaml`, finds every matching cell inside `cfg/Schedule.xlsx`, confirms the target range already has data, and writes the lookup value. Logs show the ranges updated and row/cell counts.
+## Update flow
+1. Double-check the Google Sheet already contains placeholder data in every target cell. The updater refuses to overwrite blank ranges.
+2. The tool loads `cfg/config.yaml`, scans `cfg/Schedule.xlsx` for the lookup value, fetches the matching ranges from the Google Sheet, and writes the lookup value into any cells that currently contain something else. Logs list every range touched plus total rows/cells.
 
-## Authentication helper (optional)
-User credentials often need a quota project. You can run:
-```
-./scripts/gcloud_login.sh
-./scripts/run_with_gcloud.sh
-```
-Skip these if you rely on a service-account JSON file.
+## Optional auth helpers
+Run `make gcloud-login` to perform the scoped ADC login through `gcloud`.
+Run `make run-with-gcloud` to launch the updater using that session.
 
-## Tweaking the config later
-Re-run `go run ./cmd/configset` whenever you need to change the spreadsheet ID, sheet filter, lookup text, or workbook. Defaults are pre-filled with the current values.
-
-## Notes
-- `cfg/config.yaml` and `cfg/Schedule.xlsx` are the only inputs the updater uses. Delete the YAML to rerun the wizard from scratch.
+## Handy notes
+- `cfg/config.yaml` + `cfg/Schedule.xlsx` are the only inputs. Delete the YAML if you want to start from a clean slate.
 - Finder selections only accept `.xls`/`.xlsx` files.
-- The updater refuses to overwrite empty ranges—seed the sheet manually the first time.
+- Empty Google Sheet ranges are skipped; seed them manually once so the updater can detect the pre-existing data.
