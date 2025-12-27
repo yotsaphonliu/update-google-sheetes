@@ -40,6 +40,12 @@ func main() {
 		log.Error("update failed", zap.Error(err))
 		exitErr("%v", err)
 	}
+	if len(summary.TemplateSheets) > 0 {
+		log.Info("template sheets scanned", zap.Strings("template_sheets", summary.TemplateSheets))
+	}
+	if len(summary.TargetSheets) > 0 {
+		log.Info("target sheets detected", zap.Strings("target_sheets", summary.TargetSheets))
+	}
 
 	if summary.SkippedReason != "" {
 		log.Info("no updates performed", zap.String("reason", summary.SkippedReason))

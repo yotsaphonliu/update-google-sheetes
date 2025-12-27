@@ -14,10 +14,12 @@ import (
 
 // Summary describes the outcome of an update run.
 type Summary struct {
-	Ranges        []string
-	TotalCells    int64
-	TotalRows     int64
-	SkippedReason string
+	Ranges         []string
+	TotalCells     int64
+	TotalRows      int64
+	SkippedReason  string
+	TemplateSheets []string
+	TargetSheets   []string
 }
 
 // Update synchronises lookup-derived cells with the given spreadsheet.
@@ -31,10 +33,12 @@ func Update(ctx context.Context, cfg config.Config) (Summary, error) {
 		return summary, fmt.Errorf("initialise Sheets service: %w", err)
 	}
 
-	ranges, err := deriveRangesFromExcel(config.DefaultWorkbook, cfg.SheetFilter, cfg.LookupValue)
+	ranges, templateSheets, err := deriveRangesFromExcel(config.DefaultWorkbook, cfg.SheetFilter, cfg.LookupValue)
 	if err != nil {
 		return summary, err
 	}
+	summary.TemplateSheets = templateSheets
+	summary.TargetSheets = uniqueSheetNames(ranges)
 
 	payloads, err := buildPayloads(ctx, svc, cfg.SpreadsheetID, ranges, values)
 	if err != nil {
@@ -130,24 +134,24 @@ func cellHasValue(values [][]interface{}, row, col int) bool {
 	return strings.TrimSpace(fmt.Sprint(values[row][col])) != ""
 }
 
-func deriveRangesFromExcel(path, sheetFilter, lookup string) ([]string, error) {
+func deriveRangesFromExcel(path, sheetFilter, lookup string) ([]string, []string, error) {
 	f, err := excelize.OpenFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("open config workbook: %w", err)
+		return nil, nil, fmt.Errorf("open config workbook: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
 	want := strings.TrimSpace(lookup)
 	sheetsList := filterSheets(f.GetSheetList(), sheetFilter)
 	if sheetFilter != "" && len(sheetsList) == 0 {
-		return nil, fmt.Errorf("sheet %q not found in %s", sheetFilter, path)
+		return nil, nil, fmt.Errorf("sheet %q not found in %s", sheetFilter, path)
 	}
 
 	var matches []string
 	for _, sheet := range sheetsList {
 		rows, err := f.GetRows(sheet)
 		if err != nil {
-			return nil, fmt.Errorf("read sheet %s: %w", sheet, err)
+			return nil, nil, fmt.Errorf("read sheet %s: %w", sheet, err)
 		}
 		for rIdx, row := range rows {
 			for cIdx, cell := range row {
@@ -156,7 +160,7 @@ func deriveRangesFromExcel(path, sheetFilter, lookup string) ([]string, error) {
 				}
 				cellName, err := excelize.CoordinatesToCellName(cIdx+1, rIdx+1)
 				if err != nil {
-					return nil, fmt.Errorf("build cell name: %w", err)
+					return nil, nil, fmt.Errorf("build cell name: %w", err)
 				}
 				matches = append(matches, formatRange(sheet, cellName))
 			}
@@ -164,9 +168,9 @@ func deriveRangesFromExcel(path, sheetFilter, lookup string) ([]string, error) {
 	}
 
 	if len(matches) == 0 {
-		return nil, fmt.Errorf("value %q not found in %s", lookup, path)
+		return nil, nil, fmt.Errorf("value %q not found in %s", lookup, path)
 	}
-	return matches, nil
+	return matches, sheetsList, nil
 }
 
 func filterSheets(all []string, filter string) []string {
@@ -186,4 +190,34 @@ func formatRange(sheet, cell string) string {
 		return fmt.Sprintf("'%s'!%s", strings.ReplaceAll(sheet, "'", "''"), cell)
 	}
 	return fmt.Sprintf("%s!%s", sheet, cell)
+}
+
+func uniqueSheetNames(ranges []string) []string {
+	seen := make(map[string]struct{})
+	var names []string
+	for _, rng := range ranges {
+		name := sheetNameFromRange(rng)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	return names
+}
+
+func sheetNameFromRange(rng string) string {
+	idx := strings.Index(rng, "!")
+	if idx == -1 {
+		return ""
+	}
+	sheet := rng[:idx]
+	if strings.HasPrefix(sheet, "'") && strings.HasSuffix(sheet, "'") && len(sheet) >= 2 {
+		sheet = sheet[1 : len(sheet)-1]
+		sheet = strings.ReplaceAll(sheet, "''", "'")
+	}
+	return sheet
 }
