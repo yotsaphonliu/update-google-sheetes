@@ -6,4 +6,7 @@ gcloud-login:
 run-with-gcloud:
 	./scripts/run_with_gcloud.sh
 
-gcloud-all: gcloud-login run-with-gcloud
+excel-lookup:
+	./scripts/excel_lookup.sh
+
+gcloud-all: gcloud-login excel-lookup run-with-gcloud

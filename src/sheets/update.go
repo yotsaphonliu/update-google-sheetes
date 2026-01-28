@@ -2,6 +2,7 @@ package sheets
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -33,7 +34,7 @@ func Update(ctx context.Context, cfg config.Config) (Summary, error) {
 		return summary, fmt.Errorf("initialise Sheets service: %w", err)
 	}
 
-	ranges, templateSheets, err := deriveRangesFromExcel(config.DefaultWorkbook, cfg.SheetFilter, cfg.LookupValue)
+	ranges, templateSheets, err := loadCachedRanges()
 	if err != nil {
 		return summary, err
 	}
@@ -65,11 +66,12 @@ func Update(ctx context.Context, cfg config.Config) (Summary, error) {
 
 func buildPayloads(ctx context.Context, svc *sheets.Service, sheetID string, ranges []string, desired [][]interface{}) ([]*sheets.ValueRange, error) {
 	var payloads []*sheets.ValueRange
+	existingValues, err := fetchRangeValuesBatch(ctx, svc, sheetID, ranges)
+	if err != nil {
+		return nil, err
+	}
 	for _, rng := range ranges {
-		existing, err := fetchRangeValues(ctx, svc, sheetID, rng)
-		if err != nil {
-			return nil, fmt.Errorf("precondition failed for %s: %w", rng, err)
-		}
+		existing := existingValues[rng]
 		merged, needsUpdate := mergeValues(existing, desired)
 		if !needsUpdate {
 			continue
@@ -96,12 +98,26 @@ func batchUpdate(ctx context.Context, svc *sheets.Service, sheetID string, data 
 	return resp, nil
 }
 
-func fetchRangeValues(ctx context.Context, svc *sheets.Service, sheetID, rng string) ([][]interface{}, error) {
-	resp, err := svc.Spreadsheets.Values.Get(sheetID, rng).Context(ctx).Do()
-	if err != nil {
-		return nil, fmt.Errorf("fetch current value: %w", err)
+func fetchRangeValuesBatch(ctx context.Context, svc *sheets.Service, sheetID string, ranges []string) (map[string][][]interface{}, error) {
+	if len(ranges) == 0 {
+		return map[string][][]interface{}{}, nil
 	}
-	return resp.Values, nil
+	call := svc.Spreadsheets.Values.BatchGet(sheetID)
+	call = call.Ranges(ranges...)
+	resp, err := call.Context(ctx).Do()
+	if err != nil {
+		return nil, fmt.Errorf("batch fetch current values: %w", err)
+	}
+	values := make(map[string][][]interface{}, len(ranges))
+	for _, vr := range resp.ValueRanges {
+		values[vr.Range] = vr.Values
+	}
+	for _, rng := range ranges {
+		if _, ok := values[rng]; !ok {
+			values[rng] = nil
+		}
+	}
+	return values, nil
 }
 
 func mergeValues(existing, desired [][]interface{}) ([][]interface{}, bool) {
@@ -134,7 +150,19 @@ func cellHasValue(values [][]interface{}, row, col int) bool {
 	return strings.TrimSpace(fmt.Sprint(values[row][col])) != ""
 }
 
-func deriveRangesFromExcel(path, sheetFilter, lookup string) ([]string, []string, error) {
+func loadCachedRanges() ([]string, []string, error) {
+	ranges, err := ReadRangeCache(DefaultRangeCache)
+	if err != nil {
+		if errors.Is(err, ErrRangeCacheNotFound) {
+			return nil, nil, fmt.Errorf("range cache missing; run go run ./cmd/lookupscan to refresh it: %w", err)
+		}
+		return nil, nil, err
+	}
+	sheetNames := uniqueSheetNames(ranges)
+	return ranges, sheetNames, nil
+}
+
+func ScanWorkbook(path, sheetFilter, lookup string) ([]string, []string, error) {
 	f, err := excelize.OpenFile(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open config workbook: %w", err)
@@ -149,21 +177,32 @@ func deriveRangesFromExcel(path, sheetFilter, lookup string) ([]string, []string
 
 	var matches []string
 	for _, sheet := range sheetsList {
-		rows, err := f.GetRows(sheet)
+		rows, err := f.Rows(sheet)
 		if err != nil {
-			return nil, nil, fmt.Errorf("read sheet %s: %w", sheet, err)
+			return nil, nil, fmt.Errorf("iterate sheet %s: %w", sheet, err)
 		}
-		for rIdx, row := range rows {
+		rowIdx := 0
+		for rows.Next() {
+			rowIdx++
+			row, err := rows.Columns()
+			if err != nil {
+				_ = rows.Close()
+				return nil, nil, fmt.Errorf("read row %d in %s: %w", rowIdx, sheet, err)
+			}
 			for cIdx, cell := range row {
 				if strings.TrimSpace(cell) != want {
 					continue
 				}
-				cellName, err := excelize.CoordinatesToCellName(cIdx+1, rIdx+1)
+				cellName, err := excelize.CoordinatesToCellName(cIdx+1, rowIdx)
 				if err != nil {
+					_ = rows.Close()
 					return nil, nil, fmt.Errorf("build cell name: %w", err)
 				}
 				matches = append(matches, formatRange(sheet, cellName))
 			}
+		}
+		if err := rows.Close(); err != nil {
+			return nil, nil, fmt.Errorf("close sheet reader %s: %w", sheet, err)
 		}
 	}
 
