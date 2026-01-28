@@ -7,4 +7,4 @@ echo "Launching the Google Sheets updater..." >&2
 
 cd "${SCRIPT_DIR}"
 cd ..
-exec go run . "$@"
+TZ=Asia/Bangkok exec  go run . "$@"
