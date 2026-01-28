@@ -15,6 +15,7 @@ Push one lookup value into many Google Sheets cells using an Excel workbook as t
    - Provide the **Google spreadsheet ID** (the part after `/d/` in the URL).
    - Optionally enter a **sheet filter** to restrict matching to a single tab inside the workbook.
    - Enter the **lookup value** (the text the updater searches for inside the workbook).
+   - Optionally set **schedule time** (HH:MM or HH:MM:SS) to schedule the run for that Bangkok local time. The binary waits until the next occurrence (today or tomorrow) before touching Google Sheets.
    - Decide whether to keep the existing workbook or pick a new `.xls`/`.xlsx` file; the chosen file is copied into `cfg/Schedule.xlsx`.
 2. Answers land in `cfg/config.yaml`. Re-run the wizard any time you want to change the spreadsheet, lookup text, or workbook.
 
@@ -29,5 +30,6 @@ Run `make run-with-gcloud` to launch the updater using that session.
 
 ## Handy notes
 - `cfg/config.yaml` + `cfg/Schedule.xlsx` are the only inputs. Delete the YAML if you want to start from a clean slate.
+- Leave `schedule_time` blank to run immediately; otherwise, the updater blocks like a cron job until the next Asia/Bangkok occurrence of that time, even if the next slot is tomorrow.
 - Finder selections only accept `.xls`/`.xlsx` files.
 - Empty Google Sheet ranges are skipped; seed them manually once so the updater can detect the pre-existing data.

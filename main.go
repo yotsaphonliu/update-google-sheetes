@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -35,6 +36,12 @@ func main() {
 		zap.String("lookup_value", cfg.LookupValue),
 	)
 
+	if cfg.ScheduleTime != "" {
+		if err := waitForScheduleTime(log, cfg); err != nil {
+			exitErr("%v", err)
+		}
+	}
+
 	summary, err := sheetops.Update(context.Background(), cfg)
 	if err != nil {
 		log.Error("update failed", zap.Error(err))
@@ -63,4 +70,39 @@ func main() {
 func exitErr(msg string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, msg+"\n", args...)
 	os.Exit(1)
+}
+
+const bangkokTZ = "Asia/Bangkok"
+
+func waitForScheduleTime(log *zap.Logger, cfg config.Config) error {
+	loc, err := time.LoadLocation(bangkokTZ)
+	if err != nil {
+		return fmt.Errorf("load timezone: %w", err)
+	}
+	offset, err := cfg.ScheduleTimeOffset()
+	if err != nil {
+		return fmt.Errorf("parse schedule_time: %w", err)
+	}
+	now := time.Now().In(loc)
+	runAt := nextEffectiveRun(now, offset)
+	sleep := time.Until(runAt)
+	if sleep > 0 {
+		log.Info(
+			"waiting for schedule_time",
+			zap.String("timezone", bangkokTZ),
+			zap.String("scheduled_time", runAt.Format(time.RFC3339)),
+			zap.Duration("sleep", sleep),
+		)
+		time.Sleep(sleep)
+	}
+	return nil
+}
+
+func nextEffectiveRun(now time.Time, offset time.Duration) time.Time {
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	scheduled := start.Add(offset)
+	if !scheduled.After(now) {
+		scheduled = scheduled.Add(24 * time.Hour)
+	}
+	return scheduled
 }
