@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/xuri/excelize/v2"
@@ -27,8 +28,6 @@ type Summary struct {
 func Update(ctx context.Context, cfg config.Config) (Summary, error) {
 	var summary Summary
 
-	values := [][]interface{}{{cfg.LookupValue}}
-
 	svc, err := sheets.NewService(ctx, option.WithScopes(sheets.SpreadsheetsScope))
 	if err != nil {
 		return summary, fmt.Errorf("initialise Sheets service: %w", err)
@@ -39,9 +38,17 @@ func Update(ctx context.Context, cfg config.Config) (Summary, error) {
 		return summary, err
 	}
 	summary.TemplateSheets = templateSheets
-	summary.TargetSheets = uniqueSheetNames(ranges)
+	segments, err := compressRanges(ranges)
+	if err != nil {
+		return summary, err
+	}
+	segmentRefs := make([]string, len(segments))
+	for i, seg := range segments {
+		segmentRefs[i] = seg.Reference
+	}
+	summary.TargetSheets = uniqueSheetNames(segmentRefs)
 
-	payloads, err := buildPayloads(ctx, svc, cfg.SpreadsheetID, ranges, values)
+	payloads, err := buildPayloads(ctx, svc, cfg.SpreadsheetID, segments, cfg.LookupValue)
 	if err != nil {
 		return summary, err
 	}
@@ -64,21 +71,26 @@ func Update(ctx context.Context, cfg config.Config) (Summary, error) {
 	return summary, nil
 }
 
-func buildPayloads(ctx context.Context, svc *sheets.Service, sheetID string, ranges []string, desired [][]interface{}) ([]*sheets.ValueRange, error) {
+func buildPayloads(ctx context.Context, svc *sheets.Service, sheetID string, segments []rangeSegment, value interface{}) ([]*sheets.ValueRange, error) {
 	var payloads []*sheets.ValueRange
-	existingValues, err := fetchRangeValuesBatch(ctx, svc, sheetID, ranges)
+	var rangeRefs []string
+	for _, seg := range segments {
+		rangeRefs = append(rangeRefs, seg.Reference)
+	}
+	existingValues, err := fetchRangeValuesBatch(ctx, svc, sheetID, rangeRefs)
 	if err != nil {
 		return nil, err
 	}
-	for _, rng := range ranges {
-		existing := existingValues[rng]
+	for _, seg := range segments {
+		existing := existingValues[seg.Reference]
+		desired := fillDesiredMatrix(value, seg.Rows, seg.Cols)
 		merged, needsUpdate := mergeValues(existing, desired)
 		if !needsUpdate {
 			continue
 		}
 		payloads = append(payloads, &sheets.ValueRange{
 			MajorDimension: "ROWS",
-			Range:          rng,
+			Range:          seg.Reference,
 			Values:         merged,
 		})
 	}
@@ -118,6 +130,121 @@ func fetchRangeValuesBatch(ctx context.Context, svc *sheets.Service, sheetID str
 		}
 	}
 	return values, nil
+}
+
+type rangeSegment struct {
+	Reference string
+	Rows      int
+	Cols      int
+}
+
+func compressRanges(ranges []string) ([]rangeSegment, error) {
+	if len(ranges) == 0 {
+		return nil, errors.New("no ranges provided")
+	}
+	type columnGroup struct {
+		sheet string
+		col   int
+		rows  []int
+	}
+	groups := make(map[string]*columnGroup)
+	for _, rng := range ranges {
+		sheet := sheetNameFromRange(rng)
+		if sheet == "" {
+			return nil, fmt.Errorf("invalid range %q", rng)
+		}
+		cellRef, err := cellReference(rng)
+		if err != nil {
+			return nil, err
+		}
+		col, row, err := excelize.CellNameToCoordinates(cellRef)
+		if err != nil {
+			return nil, fmt.Errorf("parse %s: %w", rng, err)
+		}
+		key := fmt.Sprintf("%s|%d", sheet, col)
+		grp, ok := groups[key]
+		if !ok {
+			grp = &columnGroup{sheet: sheet, col: col}
+			groups[key] = grp
+		}
+		grp.rows = append(grp.rows, row)
+	}
+	var segments []rangeSegment
+	keys := make([]string, 0, len(groups))
+	for key := range groups {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		grp := groups[key]
+		sort.Ints(grp.rows)
+		start := grp.rows[0]
+		prev := grp.rows[0]
+		for i := 1; i < len(grp.rows); i++ {
+			current := grp.rows[i]
+			if current == prev+1 {
+				prev = current
+				continue
+			}
+			segment, err := buildSegment(grp.sheet, grp.col, start, prev)
+			if err != nil {
+				return nil, err
+			}
+			segments = append(segments, segment)
+			start = current
+			prev = current
+		}
+		segment, err := buildSegment(grp.sheet, grp.col, start, prev)
+		if err != nil {
+			return nil, err
+		}
+		segments = append(segments, segment)
+	}
+	return segments, nil
+}
+
+func buildSegment(sheet string, col, startRow, endRow int) (rangeSegment, error) {
+	startCell, err := excelize.CoordinatesToCellName(col, startRow)
+	if err != nil {
+		return rangeSegment{}, fmt.Errorf("build start cell: %w", err)
+	}
+	ref := startCell
+	rows := endRow - startRow + 1
+	if rows < 1 {
+		rows = 1
+	}
+	if rows > 1 {
+		endCell, err := excelize.CoordinatesToCellName(col, endRow)
+		if err != nil {
+			return rangeSegment{}, fmt.Errorf("build end cell: %w", err)
+		}
+		ref = fmt.Sprintf("%s:%s", startCell, endCell)
+	}
+	return rangeSegment{
+		Reference: formatRange(sheet, ref),
+		Rows:      rows,
+		Cols:      1,
+	}, nil
+}
+
+func cellReference(rng string) (string, error) {
+	idx := strings.Index(rng, "!")
+	if idx == -1 {
+		return "", fmt.Errorf("invalid range %q", rng)
+	}
+	return rng[idx+1:], nil
+}
+
+func fillDesiredMatrix(value interface{}, rows, cols int) [][]interface{} {
+	matrix := make([][]interface{}, rows)
+	for r := 0; r < rows; r++ {
+		row := make([]interface{}, cols)
+		for c := 0; c < cols; c++ {
+			row[c] = value
+		}
+		matrix[r] = row
+	}
+	return matrix
 }
 
 func mergeValues(existing, desired [][]interface{}) ([][]interface{}, bool) {
